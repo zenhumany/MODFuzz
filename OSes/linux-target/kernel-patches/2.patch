@@ -1,0 +1,95 @@
+diff --git a/kernel/Makefile b/kernel/Makefile
+index f2cc0d118a0b..c94a94e110fd 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -135,3 +135,6 @@ $(obj)/kheaders_data.tar.xz: FORCE
+ 	$(call cmd,genikh)
+ 
+ clean-files := kheaders_data.tar.xz kheaders.md5
++
++CFLAGS_kcov.o := -O0
++
+diff --git a/kernel/kcov.c b/kernel/kcov.c
+index f50354202dbe..00fa11daf8aa 100644
+--- a/kernel/kcov.c
++++ b/kernel/kcov.c
+@@ -22,12 +22,13 @@
+ #include <linux/debugfs.h>
+ #include <linux/uaccess.h>
+ #include <linux/kcov.h>
++#include <linux/hash.h>
+ #include <linux/refcount.h>
+ #include <linux/log2.h>
+ #include <asm/setup.h>
+ 
+ #define kcov_debug(fmt, ...) pr_debug("%s: " fmt, __func__, ##__VA_ARGS__)
+-
++#define WARN_ON(condition) 0
+ /* Number of 64-bit words written per one comparison: */
+ #define KCOV_WORDS_PER_CMP 4
+ 
+@@ -172,6 +173,10 @@ static notrace unsigned long canonicalize_ip(unsigned long ip)
+ 	return ip;
+ }
+ 
++
++extern unsigned char *ivshmem_bar2_map_base(void);
++
++
+ /*
+  * Entry point from instrumented code.
+  * This is called once per basic-block/edge.
+@@ -199,29 +204,21 @@
+ void notrace __sanitizer_cov_trace_pc(void)
+ {
+ 	struct task_struct *t;
+-	unsigned long *area;
+ 	unsigned long ip = canonicalize_ip(_RET_IP_);
+-	unsigned long pos;
++	unsigned long *bitmap;
++	bitmap = (unsigned long *)ivshmem_bar2_map_base();
++	static long count_bb = 0;
++	if (!bitmap)
++		return;
+ 
+ 	t = current;
+-	if (!check_kcov_mode(KCOV_MODE_TRACE_PC, t))
+-		return;
+-
+-	area = t->kcov_area;
+-	/* The first 64-bit word is the number of subsequent PCs. */
+-	pos = READ_ONCE(area[0]) + 1;
+-	if (likely(pos < t->kcov_size)) {
+-		/* Previously we write pc before updating pos. However, some
+-		 * early interrupt code could bypass check_kcov_mode() check
+-		 * and invoke __sanitizer_cov_trace_pc(). If such interrupt is
+-		 * raised between writing pc and updating pos, the pc could be
+-		 * overitten by the recursive __sanitizer_cov_trace_pc().
+-		 * Update pos before writing pc to avoid such interleaving.
+-		 */
+-		WRITE_ONCE(area[0], pos);
+-		barrier();
+-		area[pos] = ip;
+-	}
++	
++	bitmap[count_bb] = ip;
++	
++	
++	count_bb ++;
++	
++	
+ }
+ EXPORT_SYMBOL(__sanitizer_cov_trace_pc);
+ 
+@@ -1078,3 +1077,10 @@
+ }
+ 
+ device_initcall(kcov_init);
++#undef WARN_ON
++#define WARN_ON(condition) ({						\
++	int __ret_warn_on = !!(condition);				\
++	if (unlikely(__ret_warn_on))					\
++		__WARN();						\
++	unlikely(__ret_warn_on);					\
++})
+
